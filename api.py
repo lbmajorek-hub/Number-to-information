@@ -8,8 +8,8 @@ import re
 app = Flask(__name__)
 
 # ===== REAL API CONFIG =====
-REAL_API = "https://vippanels.x10.mx/numapi.php"
-API_KEY = "boss"
+REAL_API = "https://api.x10.network/numapi.php"
+API_KEY = "kasa"
 
 # ===== IST TIME =====
 def ist_time():
@@ -34,7 +34,7 @@ def format_record(item):
 def priyanshu_api():
     number = request.args.get("number", "")
 
-    # ❌ Invalid number
+    # ❌ Only 10-digit numbers allowed
     if not re.fullmatch(r"\d{10}", number):
         return app.response_class(
             response=json.dumps({
@@ -53,7 +53,7 @@ def priyanshu_api():
             params={
                 "action": "api",
                 "key": API_KEY,
-                "term": number
+                "number": number
             },
             timeout=10
         )
@@ -81,7 +81,7 @@ def priyanshu_api():
         return app.response_class(
             response=json.dumps({
                 "success": False,
-                "message": " prime ids error ",
+                "message": "Source API error",
                 "meta": {
                     "ist": ist_time()
                 }
