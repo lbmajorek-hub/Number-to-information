@@ -1,95 +1,141 @@
-from flask import Flask, request
-import requests
-import json
+from flask import Flask, request, jsonify
+import requests, re, time
 from datetime import datetime
 import pytz
-import re
+from collections import defaultdict
 
 app = Flask(__name__)
 
-# ===== REAL API CONFIG =====
-REAL_API = "https://api.x10.network/numapi.php"
-API_KEY = "kasa"
+# ================= REAL APIs =================
+PRIMARY_API = "https://api.x10.network/numapi.php"
+PRIMARY_KEY = "kasa"
 
-# ===== IST TIME =====
+BACKUP_API = "https://api.x10.network/numapi.php"
+BACKUP_KEY = "SALAAR"
+
+# ================= API KEYS & LIMITS =================
+API_KEYS = {
+    "Purvi": 5,
+    "Ist": 10,
+    "Priyanshu": float("inf")
+}
+
+# ================= STORAGE =================
+IP_STATS = defaultdict(lambda: {
+    "requests": 0,
+    "user_agent": "",
+    "last_reset": time.time(),
+    "limit": 0
+})
+
+WINDOW = 86400  # 24 hours
+
+# ================= IST TIME =================
 def ist_time():
     tz = pytz.timezone("Asia/Kolkata")
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S IST")
 
-# ===== FORMATTER =====
-def format_record(item):
-    return {
-        "mobile": item.get("mobile"),
-        "name": item.get("name"),
-        "fname": item.get("father_name"),
-        "address": item.get("address"),
-        "circle": item.get("circle"),
-        "id": item.get("id_number"),
-        "alt": item.get("alt_mobile"),
-        "mail": item.get("email")
-    }
+# ================= RESET CHECK =================
+def reset_if_needed(ip):
+    if time.time() - IP_STATS[ip]["last_reset"] > WINDOW:
+        IP_STATS[ip]["requests"] = 0
+        IP_STATS[ip]["last_reset"] = time.time()
 
-# ===== API ENDPOINT =====
+# ================= MAIN API =================
 @app.route("/api/priyanshu", methods=["GET"])
 def priyanshu_api():
+
+    # 🔥 HIDDEN IP LOGS (same endpoint)
+    if request.args.get("logs") == "ip":
+        return jsonify({
+            "success": True,
+            "ip_logs": {
+                ip: {
+                    "requests": data["requests"],
+                    "limit": ("unlimited" if data["limit"] == float("inf") else data["limit"]),
+                    "remaining": (
+                        "unlimited" if data["limit"] == float("inf")
+                        else max(data["limit"] - data["requests"], 0)
+                    ),
+                    "user_agent": data["user_agent"],
+                    "reset_after": int(max(WINDOW - (time.time() - data["last_reset"]), 0))
+                }
+                for ip, data in IP_STATS.items()
+            }
+        })
+
+    # ---------- NORMAL FLOW ----------
+    ip = request.remote_addr
+    user_agent = request.headers.get("User-Agent", "Unknown")
     number = request.args.get("number", "")
+    key = request.args.get("key", "")
 
-    # ❌ Only 10-digit numbers allowed
+    # API KEY CHECK
+    if key not in API_KEYS:
+        return jsonify({
+            "success": False,
+            "message": "Invalid API key."
+        }), 403
+
+    # NUMBER CHECK
     if not re.fullmatch(r"\d{10}", number):
-        return app.response_class(
-            response=json.dumps({
-                "success": False,
-                "message": "Provide a valid 10-digit mobile number",
-                "meta": {
-                    "ist": ist_time()
-                }
-            }, indent=2),
-            mimetype="application/json"
-        ), 400
+        return jsonify({
+            "success": False,
+            "message": "Provide a valid 10-digit mobile number."
+        }), 400
 
+    reset_if_needed(ip)
+
+    limit = API_KEYS[key]
+    IP_STATS[ip]["limit"] = limit
+
+    if IP_STATS[ip]["requests"] >= limit:
+        return jsonify({
+            "success": False,
+            "message": "Rate limit exceeded. Your access will reset automatically after 24 hours."
+        }), 429
+
+    # COUNT + UA
+    IP_STATS[ip]["requests"] += 1
+    IP_STATS[ip]["user_agent"] = user_agent
+
+    # TRY PRIMARY API
     try:
-        resp = requests.get(
-            REAL_API,
-            params={
-                "action": "api",
-                "key": API_KEY,
-                "number": number
-            },
-            timeout=10
-        )
+        r = requests.get(PRIMARY_API, params={
+            "action": "api",
+            "key": PRIMARY_KEY,
+            "number": number
+        }, timeout=10)
 
-        raw = resp.json()
-
-        if not isinstance(raw, list):
-            raise ValueError("Invalid source response")
-
-        data = [format_record(i) for i in raw]
-
-        return app.response_class(
-            response=json.dumps({
+        if r.status_code == 200:
+            return jsonify({
                 "success": True,
-                "records": len(data),
-                "data": data,
-                "meta": {
-                    "ist": ist_time()
-                }
-            }, indent=2),
-            mimetype="application/json"
-        )
+                "data": r.json()
+            })
+    except:
+        pass
 
-    except Exception:
-        return app.response_class(
-            response=json.dumps({
-                "success": False,
-                "message": "Source API error",
-                "meta": {
-                    "ist": ist_time()
-                }
-            }, indent=2),
-            mimetype="application/json"
-        ), 500
+    # TRY BACKUP API
+    try:
+        r = requests.get(BACKUP_API, params={
+            "action": "api",
+            "key": BACKUP_KEY,
+            "number": number
+        }, timeout=10)
 
+        if r.status_code == 200:
+            return jsonify({
+                "success": True,
+                "data": r.json()
+            })
+    except:
+        pass
 
-# --- Run Server ---
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    return jsonify({
+        "success": False,
+        "message": "Priyanshu ide error"
+    }), 500
+
+# ================= RUN =================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
