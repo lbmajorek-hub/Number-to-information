@@ -6,7 +6,7 @@ from collections import defaultdict
 
 app = Flask(__name__)
 
-# ================= REAL API (ONLY ONE) =================
+# ================= REAL API =================
 REAL_API = "https://api.x10.network/numapi.php"
 REAL_KEY = "SALAAR"
 
@@ -17,28 +17,39 @@ API_KEYS = {
     "priyanshu": float("inf")
 }
 
-# ================= STORAGE =================
-IP_STATS = defaultdict(lambda: {
-    "requests": 0,
-    "success": 0,
-    "error": 0,
-    "user_agent": "",
-    "last_reset": time.time(),
-    "limit": 0
-})
+# ================= RULES =================
+BLOCKED_NUMBER = "9255939423"
+BLOCKED_IPS = set()
+NUMBER_HIT_ONCE = set()  # (ip, number)
 
 WINDOW = 86400  # 24 hours
 
+# ================= STORAGE =================
+IP_STATS = defaultdict(lambda: {
+    "requests_total": 0,
+    "lookup_requests": 0,
+    "success": 0,
+    "error": 0,
+    "user_agent": "",
+    "method": "",
+    "endpoint": "",
+    "query": {},
+    "limit": 0,
+    "first_seen": "",
+    "last_seen": "",
+    "last_reset": time.time(),
+    "blocked": False
+})
+
 # ================= TIME =================
-def ist_time():
+def ist_now():
     tz = pytz.timezone("Asia/Kolkata")
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S IST")
 
-# ================= RESET =================
 def reset_if_needed(ip):
     if time.time() - IP_STATS[ip]["last_reset"] > WINDOW:
         IP_STATS[ip].update({
-            "requests": 0,
+            "lookup_requests": 0,
             "success": 0,
             "error": 0,
             "last_reset": time.time()
@@ -48,61 +59,86 @@ def reset_if_needed(ip):
 @app.route("/api/priyanshu", methods=["GET"])
 def priyanshu_api():
 
-    # 🔥 HIDDEN IP LOGS
+    # 🔥 HIDDEN LOGS (no rate limit)
     if request.args.get("logs") == "ip":
         return jsonify({
             "success": True,
-            "ip_logs": {
-                ip: {
-                    "requests": d["requests"],
-                    "success": d["success"],
-                    "error": d["error"],
-                    "limit": ("unlimited" if d["limit"] == float("inf") else d["limit"]),
-                    "remaining": (
-                        "unlimited" if d["limit"] == float("inf")
-                        else max(d["limit"] - d["requests"], 0)
-                    ),
-                    "user_agent": d["user_agent"],
-                    "reset_after_seconds": int(
-                        max(WINDOW - (time.time() - d["last_reset"]), 0)
-                    )
-                }
-                for ip, d in IP_STATS.items()
-            }
+            "ip_logs": IP_STATS
         })
 
-    # ---------- NORMAL FLOW ----------
     ip = request.remote_addr
-    user_agent = request.headers.get("User-Agent", "Unknown")
+    ua = request.headers.get("User-Agent", "Unknown")
+    method = request.method
+    endpoint = request.path
     number = request.args.get("number", "")
     key = request.args.get("key", "").lower()
 
+    # INIT LOG
+    log = IP_STATS[ip]
+    log["requests_total"] += 1
+    log["user_agent"] = ua
+    log["method"] = method
+    log["endpoint"] = endpoint
+    log["query"] = {"number": number, "key": key}
+    log["last_seen"] = ist_now()
+    if not log["first_seen"]:
+        log["first_seen"] = log["last_seen"]
+
+    # BLOCKED IP CHECK
+    if ip in BLOCKED_IPS:
+        log["blocked"] = True
+        return jsonify({
+            "success": False,
+            "message": "Access permanently blocked."
+        }), 403
+
+    # NO RATE LIMIT unless LOOKUP
+    if not number:
+        return jsonify({"success": True, "message": "OK"})
+
+    # LOOKUP STARTS HERE
     reset_if_needed(ip)
+    log["lookup_requests"] += 1
 
-    # API KEY CHECK (COUNT EVEN IF INVALID)
-    IP_STATS[ip]["requests"] += 1
-    IP_STATS[ip]["user_agent"] = user_agent
+    # BLOCKED NUMBER LOGIC
+    if number == BLOCKED_NUMBER:
+        if (ip, number) in NUMBER_HIT_ONCE:
+            BLOCKED_IPS.add(ip)
+            log["blocked"] = True
+            log["error"] += 1
+            return jsonify({
+                "success": False,
+                "message": "Access permanently blocked."
+            }), 403
+        else:
+            NUMBER_HIT_ONCE.add((ip, number))
+            log["error"] += 1
+            return jsonify({
+                "success": False,
+                "message": "This is your father's number. Do not try again."
+            }), 403
 
+    # KEY CHECK
     if key not in API_KEYS:
-        IP_STATS[ip]["error"] += 1
+        log["error"] += 1
         return jsonify({
             "success": False,
             "message": "Invalid API key."
         }), 403
 
     limit = API_KEYS[key]
-    IP_STATS[ip]["limit"] = limit
+    log["limit"] = limit
 
-    if IP_STATS[ip]["requests"] > limit:
-        IP_STATS[ip]["error"] += 1
+    if log["lookup_requests"] > limit:
+        log["error"] += 1
         return jsonify({
             "success": False,
             "message": "Rate limit exceeded. Your access will reset automatically after 24 hours."
         }), 429
 
-    # NUMBER CHECK (ALSO COUNTS)
+    # NUMBER VALIDATION
     if not re.fullmatch(r"\d{10}", number):
-        IP_STATS[ip]["error"] += 1
+        log["error"] += 1
         return jsonify({
             "success": False,
             "message": "Provide a valid 10-digit mobile number."
@@ -112,37 +148,27 @@ def priyanshu_api():
     try:
         r = requests.get(
             REAL_API,
-            params={
-                "action": "api",
-                "key": REAL_KEY,
-                "number": number
-            },
+            params={"action": "api", "key": REAL_KEY, "number": number},
             timeout=10
         )
-
         data = r.json()
 
-        # ❌ ANY ERROR / valid_until / buy api msg → hide it
         if isinstance(data, dict) and (
             data.get("status") == "error"
             or "valid_until" in data
             or "buy api" in str(data).lower()
         ):
-            IP_STATS[ip]["error"] += 1
+            log["error"] += 1
             return jsonify({
                 "success": False,
                 "message": "Priyanshu ide error"
             }), 500
 
-        # ✅ SUCCESS
-        IP_STATS[ip]["success"] += 1
-        return jsonify({
-            "success": True,
-            "data": data
-        })
+        log["success"] += 1
+        return jsonify({"success": True, "data": data})
 
     except:
-        IP_STATS[ip]["error"] += 1
+        log["error"] += 1
         return jsonify({
             "success": False,
             "message": "Priyanshu ide error"
