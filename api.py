@@ -7,7 +7,7 @@ from collections import defaultdict
 app = Flask(__name__)
 
 # ================= REAL API =================
-REAL_API = "https://api.x10.network/numapi.php"
+REAL_API = "https://api.paanel.shop/numapi.php"
 REAL_KEY = "SALAAR"
 
 # ================= API KEYS & LIMITS =================
