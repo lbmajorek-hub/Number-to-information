@@ -12,7 +12,7 @@ REAL_KEY = "SALAAR"
 
 # ================= API KEYS & LIMITS =================
 API_KEYS = {
-    "purvi": 5,
+    "radha": 5,
     "ist": 10,
     "prachi": float("inf")
 }
